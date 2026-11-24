@@ -1,0 +1,83 @@
+name: Build unsigned IPA
+
+# Manual only. Builds the iPhone app without signing; a sideloader signs it later.
+on:
+  workflow_dispatch:
+    inputs:
+      runner:
+        description: "Runner label (xcode-27 has the iOS 27 SDK, macos-26 has Xcode 26.x)"
+        default: "xcode-27"
+        type: string
+
+jobs:
+  build:
+    runs-on: ${{ inputs.runner }}
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Show toolchain
+        run: |
+          xcodebuild -version
+          xcodebuild -showsdks | grep -i -E "iphoneos|watchos" || true
+          ls /Applications | grep -i xcode || true
+
+      - name: Create credentials stub
+        # Dummy key: the app lets you type your own key in Settings (Debug).
+        # Analytics endpoint stays empty so nothing is ever sent.
+        run: |
+          cat > UnwatchedShared/UnwatchedShared/credentials.swift <<'EOF'
+          import Foundation
+
+          public struct Credentials {
+              public static let youtubeApiKey: String = "YouTubeDataApiKeyHere"
+              public static let unwatchedPremiumApiKey: String = "YouTubeDataApiKeyHere"
+              public static let analyticsEndpoint: String = ""
+              public static let analyticsSecret: String = ""
+          }
+          EOF
+
+      - name: Empty the entitlements (working tree only)
+        # A free Apple ID cannot sign iCloud, push, CarPlay, Siri or associated domains.
+        run: |
+          for f in Unwatched/Unwatched/Unwatched-iOS.entitlements Unwatched/UnwatchedShareExtension/UnwatchedShareExtension.entitlements; do
+            printf '<?xml version="1.0" encoding="UTF-8"?>\n<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n<plist version="1.0"><dict/></plist>\n' > "$f"
+          done
+
+      - name: Build
+        run: |
+          set -o pipefail
+          xcodebuild build \
+            -project Unwatched/Unwatched.xcodeproj \
+            -scheme Unwatched \
+            -configuration Release \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
+            2>&1 | tee build.log
+
+      - name: Package IPA
+        run: |
+          APP=build/Build/Products/Release-iphoneos/Unwatched.app
+          test -d "$APP"
+          # Extensions and the Watch app are not needed on the phone and cost free-account App IDs.
+          rm -rf "$APP/Watch" "$APP/PlugIns"
+          mkdir -p Payload
+          cp -R "$APP" Payload/
+          zip -qry Unwatched.ipa Payload
+          ls -la Unwatched.ipa
+
+      - name: Upload IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: Unwatched-unsigned-ipa
+          path: Unwatched.ipa
+          if-no-files-found: error
+
+      - name: Upload build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log
+          path: build.log
+          if-no-files-found: ignore
